@@ -1,7 +1,5 @@
 name: ProtoTest Evidence
-description: >-
-  Compares a pull request's ProtoTest run with the base branch's last green run, posts the tests it broke
-  and fixed with the operation where each one changed, and keeps the trace as an artifact.
+description: "Compares a pull request's ProtoTest run with the base branch: what broke, what was fixed, and new code without a test."
 author: Matthias Seys
 
 branding:
