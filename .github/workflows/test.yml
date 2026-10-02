@@ -1,0 +1,92 @@
+name: Test the action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      prototest-ref:
+        description: The ProtoTest branch or tag the CLI is built from.
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: MSeys/ProtoTest
+          ref: ${{ inputs.prototest-ref || 'main' }}
+          path: prototest
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build the CLI package
+        shell: pwsh
+        run: dotnet pack prototest/src/ProtoTest.Cli/ProtoTest.Cli.csproj --configuration Release --output "$env:RUNNER_TEMP/packages" -p:Version=0.0.0-ci
+
+      - name: A broken test and lost coverage fail the step
+        id: broken
+        continue-on-error: true
+        uses: ./
+        with:
+          trace: test/fixtures/pr-broken.prototrace
+          baseline: test/fixtures/base-green.prototrace
+          artifact-name: prototest-broken-${{ matrix.os }}
+          source: ${{ runner.temp }}/packages
+          version: 0.0.0-ci
+
+      - name: An unchanged run passes
+        id: unchanged
+        uses: ./
+        with:
+          trace: test/fixtures/base-green.prototrace
+          baseline: test/fixtures/base-green.prototrace
+          artifact-name: prototest-unchanged-${{ matrix.os }}
+          source: ${{ runner.temp }}/packages
+          version: 0.0.0-ci
+
+      - name: No baseline skips the comparison
+        id: none
+        uses: ./
+        with:
+          trace: test/fixtures/base-green.prototrace
+          baseline: none
+          artifact-name: prototest-none-${{ matrix.os }}
+          source: ${{ runner.temp }}/packages
+          version: 0.0.0-ci
+
+      - name: Check the outcomes
+        shell: pwsh
+        env:
+          BROKEN_OUTCOME: ${{ steps.broken.outcome }}
+          BROKEN: ${{ steps.broken.outputs.broken }}
+          REGRESSED: ${{ steps.broken.outputs.regressed }}
+          UNCHANGED_REGRESSED: ${{ steps.unchanged.outputs.regressed }}
+          UNCHANGED: ${{ steps.unchanged.outputs.broken }}
+          NONE: ${{ steps.none.outputs.broken }}
+          ARTIFACT: ${{ steps.unchanged.outputs.artifact-url }}
+        run: |
+          $failures = @()
+          if ($env:BROKEN_OUTCOME -ne 'failure') { $failures += "the broken run should fail the step, was $env:BROKEN_OUTCOME" }
+          if ($env:BROKEN -ne 'true') { $failures += "broken should be 'true', was '$env:BROKEN'" }
+          if ($env:REGRESSED -ne 'true') { $failures += "the lost coverage should report regressed 'true', was '$env:REGRESSED'" }
+          if ($env:UNCHANGED_REGRESSED -ne 'false') { $failures += "the unchanged run should report regressed 'false', was '$env:UNCHANGED_REGRESSED'" }
+          if ($env:UNCHANGED -ne 'false') { $failures += "the unchanged run should report broken 'false', was '$env:UNCHANGED'" }
+          if (-not [string]::IsNullOrEmpty($env:NONE)) { $failures += "baseline none should skip the comparison, broken was '$env:NONE'" }
+          if ([string]::IsNullOrEmpty($env:ARTIFACT)) { $failures += 'the artifact URL output is empty' }
+          if ($failures.Count -gt 0) { $failures | ForEach-Object { Write-Host "::error::$_" }; exit 1 }
+          Write-Host 'All outcomes as expected.'

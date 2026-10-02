@@ -1,0 +1,207 @@
+name: ProtoTest Evidence
+description: >-
+  Compares a pull request's ProtoTest run with the base branch's last green run, posts the tests it broke
+  and fixed with the operation where each one changed, and keeps the trace as an artifact.
+author: Matthias Seys
+
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  trace:
+    description: Path to the .prototrace file the run wrote.
+    required: true
+  baseline:
+    description: >-
+      Where the base branch's trace comes from. 'auto' downloads the trace artifact of the newest
+      successful run of this workflow on the pull request's base branch. A path uses that trace. 'none'
+      skips the comparison.
+    required: false
+    default: auto
+  artifact-name:
+    description: Name of the uploaded trace artifact, and of the artifact 'auto' downloads from the base branch.
+    required: false
+    default: prototest-trace
+  fail-on-broken:
+    description: Fail the step when a test that passed on the base branch fails now.
+    required: false
+    default: 'true'
+  fail-on-regression:
+    description: >-
+      Fail the step when the verdict over the two runs' embedded reports has a failing finding: a unit the
+      base branch covered is uncovered now, a specification changed, or a run gate failed.
+    required: false
+    default: 'true'
+  version:
+    description: Version of the ProtoTest.Cli tool, for example 1.1.0. Empty installs the latest stable release.
+    required: false
+    default: ''
+  source:
+    description: An extra NuGet source for the CLI, such as a folder of packages built from a pre-release branch.
+    required: false
+    default: ''
+  webhook-url:
+    description: Post the digest JSON to this URL.
+    required: false
+    default: ''
+  webhook-secret:
+    description: Value of the shared-secret header sent with the webhook post.
+    required: false
+    default: ''
+  webhook-secret-header:
+    description: Name of the shared-secret header.
+    required: false
+    default: X-ProtoTest-Secret
+  dotnet-roll-forward:
+    description: DOTNET_ROLL_FORWARD for the CLI, so the net8 tool runs on a newer runtime.
+    required: false
+    default: LatestMajor
+
+outputs:
+  artifact-url:
+    description: The uploaded trace artifact's URL, the link the comment carries.
+    value: ${{ steps.upload.outputs.artifact-url }}
+  baseline-run-id:
+    description: The base branch run the comparison used; empty when there was none.
+    value: ${{ steps.baseline.outputs.run-id }}
+  broken:
+    description: "'true' when a test that passed on the base branch fails now."
+    value: ${{ steps.compare.outputs.broken }}
+  regressed:
+    description: "'true' when the verdict over the embedded reports has a failing finding."
+    value: ${{ steps.compare.outputs.regressed }}
+
+runs:
+  using: composite
+  steps:
+    # Every input reaches a script through env, never interpolated into it.
+    - name: Install the ProtoTest CLI
+      shell: pwsh
+      env:
+        PROTOTEST_VERSION: ${{ inputs.version }}
+        PROTOTEST_SOURCE: ${{ inputs.source }}
+      run: |
+        $arguments = @('tool', 'update', '--global', 'ProtoTest.Cli')
+        if (-not [string]::IsNullOrWhiteSpace($env:PROTOTEST_VERSION)) { $arguments += @('--version', $env:PROTOTEST_VERSION) }
+        if (-not [string]::IsNullOrWhiteSpace($env:PROTOTEST_SOURCE)) { $arguments += @('--add-source', $env:PROTOTEST_SOURCE) }
+        dotnet @arguments
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Upload the trace
+      id: upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.trace }}
+        if-no-files-found: error
+
+    - name: Find the base branch trace
+      id: baseline
+      shell: pwsh
+      env:
+        BASELINE: ${{ inputs.baseline }}
+        ARTIFACT: ${{ inputs.artifact-name }}
+        BASE_REF: ${{ github.base_ref }}
+        WORKFLOW_REF: ${{ github.workflow_ref }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        function Set-Output([string] $name, [string] $value) { "$name=$value" >> $env:GITHUB_OUTPUT }
+        if ($env:BASELINE -eq 'none') { Write-Host 'Comparison skipped: baseline is none.'; exit 0 }
+        if ($env:BASELINE -ne 'auto') {
+          if (-not (Test-Path -LiteralPath $env:BASELINE)) { Write-Host "::warning::Baseline trace not found: $env:BASELINE"; exit 0 }
+          Set-Output path (Resolve-Path -LiteralPath $env:BASELINE).Path
+          exit 0
+        }
+        if ([string]::IsNullOrWhiteSpace($env:BASE_REF)) { Write-Host 'Comparison skipped: not a pull request run.'; exit 0 }
+
+        # github.workflow_ref is owner/repo/.github/workflows/<file>@<ref>; gh takes the file name.
+        $workflow = Split-Path -Leaf (($env:WORKFLOW_REF -split '@')[0])
+        $runId = gh run list --repo $env:GITHUB_REPOSITORY --workflow $workflow --branch $env:BASE_REF --status success --limit 1 --json databaseId --jq '.[0].databaseId'
+        if ([string]::IsNullOrWhiteSpace($runId)) { Write-Host "Comparison skipped: no successful '$workflow' run on '$env:BASE_REF' yet."; exit 0 }
+
+        $folder = Join-Path $env:RUNNER_TEMP 'prototest-baseline'
+        gh run download $runId --repo $env:GITHUB_REPOSITORY --name $env:ARTIFACT --dir $folder
+        if ($LASTEXITCODE -ne 0) { Write-Host "::warning::Run $runId on '$env:BASE_REF' has no '$env:ARTIFACT' artifact (needs actions: read)."; exit 0 }
+        $trace = Get-ChildItem -LiteralPath $folder -Filter *.prototrace -Recurse | Select-Object -First 1
+        if ($null -eq $trace) { Write-Host "::warning::Artifact '$env:ARTIFACT' of run $runId holds no .prototrace."; exit 0 }
+        Set-Output path $trace.FullName
+        Set-Output run-id $runId
+
+    - name: Compare with the base branch
+      id: compare
+      if: steps.baseline.outputs.path != ''
+      shell: pwsh
+      env:
+        TRACE: ${{ inputs.trace }}
+        BASELINE_TRACE: ${{ steps.baseline.outputs.path }}
+        DOTNET_ROLL_FORWARD: ${{ inputs.dotnet-roll-forward }}
+      run: |
+        $text = prototest compare $env:BASELINE_TRACE $env:TRACE
+        $code = $LASTEXITCODE
+        # Exit 1 means a broken test or a comparison that could not run; the annotations tell them apart.
+        $broken = @($text | Where-Object { $_ -like '::error::broken:*' }).Count -gt 0
+        if ($code -ne 0 -and -not $broken) { Write-Host '::warning::The comparison with the base branch could not run; see the log above.' }
+        $text | Where-Object { $_ -like '::*' } | ForEach-Object { Write-Host $_ }
+        "broken=$($broken.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+        "## Compared with the base branch`n" >> $env:GITHUB_STEP_SUMMARY
+        '```text' >> $env:GITHUB_STEP_SUMMARY
+        $text | Where-Object { $_ -notlike '::*' } >> $env:GITHUB_STEP_SUMMARY
+        '```' >> $env:GITHUB_STEP_SUMMARY
+
+        # The verdict needs both runs to embed a report; without one it is skipped, not failed.
+        $verdict = prototest verify $env:BASELINE_TRACE $env:TRACE 2>&1
+        $regressed = @($verdict | Where-Object { $_ -like 'ProtoTest verification failed*' }).Count -gt 0
+        $ran = @($verdict | Where-Object { $_ -like 'ProtoTest verification *' }).Count -gt 0
+        "regressed=$($regressed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+        if ($ran) {
+          $verdict | Where-Object { $_ -like '::*' } | ForEach-Object { Write-Host $_ }
+          "`n## Verdict over the embedded reports`n" >> $env:GITHUB_STEP_SUMMARY
+          '```text' >> $env:GITHUB_STEP_SUMMARY
+          $verdict | Where-Object { $_ -notlike '::*' } >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+        }
+        else {
+          Write-Host "Verdict skipped: $($verdict -join ' ')"
+        }
+
+        # The gates are their own step, so the comment is posted first.
+        exit 0
+
+    - name: Post the evidence
+      shell: pwsh
+      env:
+        TRACE: ${{ inputs.trace }}
+        BASELINE_TRACE: ${{ steps.baseline.outputs.path }}
+        GITHUB_TOKEN: ${{ github.token }}
+        PROTOTEST_FEEDBACK_TRACE_URL: ${{ steps.upload.outputs.artifact-url }}
+        PROTOTEST_FEEDBACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        PROTOTEST_FEEDBACK_WEBHOOK_SECRET: ${{ inputs.webhook-secret }}
+        PROTOTEST_FEEDBACK_WEBHOOK_SECRET_HEADER: ${{ inputs.webhook-secret-header }}
+        DOTNET_ROLL_FORWARD: ${{ inputs.dotnet-roll-forward }}
+      run: |
+        "## ProtoTest run`n" >> $env:GITHUB_STEP_SUMMARY
+        '```text' >> $env:GITHUB_STEP_SUMMARY
+        prototest summary $env:TRACE >> $env:GITHUB_STEP_SUMMARY
+        '```' >> $env:GITHUB_STEP_SUMMARY
+        if ([string]::IsNullOrWhiteSpace($env:BASELINE_TRACE)) {
+          prototest feedback $env:TRACE
+        }
+        else {
+          prototest feedback $env:TRACE --baseline $env:BASELINE_TRACE
+        }
+        exit $LASTEXITCODE
+
+    - name: Fail on a broken test
+      if: inputs.fail-on-broken == 'true' && steps.compare.outputs.broken == 'true'
+      shell: pwsh
+      run: |
+        Write-Host '::error::A test that passed on the base branch fails now; the comparison above names where.'
+        exit 1
+
+    - name: Fail on a regression
+      if: inputs.fail-on-regression == 'true' && steps.compare.outputs.regressed == 'true'
+      shell: pwsh
+      run: |
+        Write-Host '::error::The verdict over the embedded reports failed; the job summary lists the findings.'
+        exit 1
