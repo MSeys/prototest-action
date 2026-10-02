@@ -33,6 +33,12 @@ inputs:
       base branch covered is uncovered now, a specification changed, or a run gate failed.
     required: false
     default: 'true'
+  fail-on-new-uncovered:
+    description: >-
+      Also fail the step when the change adds a unit (an endpoint, an operation, a page) that no test
+      covers. Off by default: the comment names such units either way.
+    required: false
+    default: 'false'
   version:
     description: Version of the ProtoTest.Cli tool, for example 1.1.0. Empty installs the latest stable release.
     required: false
@@ -135,6 +141,7 @@ runs:
       env:
         TRACE: ${{ inputs.trace }}
         BASELINE_TRACE: ${{ steps.baseline.outputs.path }}
+        STRICT: ${{ inputs.fail-on-new-uncovered }}
         DOTNET_ROLL_FORWARD: ${{ inputs.dotnet-roll-forward }}
       run: |
         $text = prototest compare $env:BASELINE_TRACE $env:TRACE
@@ -150,7 +157,9 @@ runs:
         '```' >> $env:GITHUB_STEP_SUMMARY
 
         # The verdict needs both runs to embed a report; without one it is skipped, not failed.
-        $verdict = prototest verify $env:BASELINE_TRACE $env:TRACE 2>&1
+        $verifyArguments = @($env:BASELINE_TRACE, $env:TRACE)
+        if ($env:STRICT -eq 'true') { $verifyArguments += '--strict' }
+        $verdict = prototest verify @verifyArguments 2>&1
         $regressed = @($verdict | Where-Object { $_ -like 'ProtoTest verification failed*' }).Count -gt 0
         $ran = @($verdict | Where-Object { $_ -like 'ProtoTest verification *' }).Count -gt 0
         "regressed=$($regressed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
