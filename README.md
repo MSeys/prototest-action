@@ -38,7 +38,7 @@ jobs:
 
       - name: ProtoTest evidence
         if: always()
-        uses: MSeys/prototest-action@v1
+        uses: MSeys/prototest-action@v1.0.0
         with:
           trace: ${{ env.PROTOTEST_RESULTS }}/run.prototrace
 ```
