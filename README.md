@@ -48,25 +48,18 @@ pull request compares with.
 
 ## What the reviewer sees
 
-```markdown
-## ProtoTest run `0979490656fa4a00a6adc2798a14362d`
+The comment on a [demo pull request](https://github.com/MSeys/OpenCsms/pull/1) to OpenCSMS, which returns
+command statuses in upper case and adds an endpoint:
 
-**2 tests · 1 failed · 1 succeeded**
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/comment-dark.png">
+  <img src="docs/comment-light.png" alt="The ProtoTest Evidence comment: a card with 5 broke and OpenAPI coverage 29/31 to 29/32, a caution that 4 of the 5 failures share one cause, a table of the failing tests with their source lines, the coverage against the base branch and the new endpoint no test covers." width="640">
+</picture>
 
-**Compared with the base branch** (run `ae31c391eb5948d6940afd9468d976c4`)
-- broke `orders are listed` at `http.request` `GET /api/orders`
-
-**Coverage against the base branch**
-- `Shop:Api` · OpenAPI: 2/2 → 2/3 (-33.33 points)
-- new and uncovered: `DELETE /api/orders/{id}` (Shop:Api · OpenAPI). No test calls DELETE /api/orders/{id}. 'an order is read' calls GET /api/orders/42 on the same path; write a new test shaped like it.
-
-- **FAILED `orders are listed`** (2.01 s)
-  - `http.request` `List orders` · failed
-  - The API did not answer within 2 seconds.
-  - at `tests/OrderTests.cs:42`
-
-[Full trace](https://github.com/you/repo/actions/runs/1/artifacts/2)
-```
+It opens with a summary card, then what broke and where, the coverage that moved and the additions no test
+covers; the full record per test is folded underneath. The card is an image `api.prototest.dev` draws from
+counts and built-in coverage kinds only. Set `PROTOTEST_FEEDBACK_CARD_URL: off` in the step's `env` to leave
+it out.
 
 The job summary carries the full comparison and the run summary. A run with no failures and no changed
 outcome posts no comment.
